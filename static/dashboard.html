@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🔱 Command Center — CipherShield</title>
+<meta http-equiv="refresh" content="30">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0a0a0f;--card:#12121a;--card2:#16161f;--border:#1e1e2e;--accent:#00d084;--accent2:#0693e3;--text:#e0e0e0;--muted:#666;--danger:#cf2e2e;--warn:#fcb900;--pass:#00d084}
+body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+code,pre,.mono{font-family:'JetBrains Mono',monospace}
+
+/* HEADER */
+.header{background:var(--card);border-bottom:1px solid var(--border);padding:1rem 2rem;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100}
+.header .logo{font-size:1.3rem;font-weight:800}
+.header .logo span{background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.header .status{display:flex;gap:1.5rem;align-items:center;font-size:.85rem}
+.header .live{display:flex;align-items:center;gap:.4rem}
+.header .live::before{content:'';width:8px;height:8px;background:var(--accent);border-radius:50%;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+/* GRID */
+.dashboard{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:1rem;padding:1.5rem;max-width:1400px;margin:0 auto}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;transition:border-color .2s}
+.card:hover{border-color:var(--accent)}
+.card h2{font-size:1rem;font-weight:700;margin-bottom:1rem;display:flex;align-items:center;gap:.5rem}
+.card h2 .icon{font-size:1.2rem}
+
+/* STATS ROW */
+.stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;padding:0 1.5rem;max-width:1400px;margin:0 auto 1rem}
+.stat{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.25rem;text-align:center}
+.stat .num{font-size:2rem;font-weight:800}
+.stat .num.green{color:var(--accent)}
+.stat .num.blue{color:var(--accent2)}
+.stat .num.yellow{color:var(--warn)}
+.stat .num.red{color:var(--danger)}
+.stat .label{font-size:.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-top:.25rem}
+
+/* TOOL STATUS */
+.tool-list{display:grid;gap:.5rem}
+.tool-item{display:flex;justify-content:space-between;align-items:center;padding:.5rem .75rem;background:var(--card2);border-radius:8px;font-size:.85rem}
+.tool-item .name{font-weight:600}
+.tool-item .status-badge{padding:.15rem .6rem;border-radius:12px;font-size:.7rem;font-weight:700;text-transform:uppercase}
+.tool-item .status-badge.installed{background:var(--accent);color:#000}
+.tool-item .status-badge.missing{background:var(--danger);color:#fff}
+
+/* TARGET TABLE */
+.target-table{width:100%;border-collapse:collapse}
+.target-table th,.target-table td{padding:.6rem .5rem;text-align:left;border-bottom:1px solid var(--border);font-size:.85rem}
+.target-table th{color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:1px}
+.target-table .domain{font-weight:600;color:var(--accent)}
+.target-table .badge{display:inline-block;padding:.15rem .5rem;border-radius:10px;font-size:.7rem;font-weight:600;background:var(--card2)}
+
+/* SKILL TAGS */
+.skill-grid{display:flex;flex-wrap:wrap;gap:.5rem}
+.skill-tag{padding:.35rem .75rem;background:var(--card2);border:1px solid var(--border);border-radius:8px;font-size:.75rem;font-weight:600;transition:all .2s}
+.skill-tag:hover{border-color:var(--accent);color:var(--accent)}
+
+/* PROGRESS */
+.progress-list{display:grid;gap:.75rem}
+.progress-item .name{font-size:.85rem;font-weight:600;margin-bottom:.35rem}
+.progress-item .bar{height:6px;background:var(--border);border-radius:3px;overflow:hidden}
+.progress-item .bar .fill{height:100%;border-radius:3px;transition:width 1s ease}
+.progress-item .bar .fill.green{background:var(--accent)}
+.progress-item .bar .fill.blue{background:var(--accent2)}
+.progress-item .meta{font-size:.7rem;color:var(--muted);margin-top:.25rem}
+
+/* ACTIVITY FEED */
+.feed{display:grid;gap:.5rem;max-height:300px;overflow-y:auto}
+.feed-item{display:flex;gap:.75rem;padding:.5rem;font-size:.8rem;border-bottom:1px solid var(--border)}
+.feed-item .time{color:var(--muted);white-space:nowrap;font-family:'JetBrains Mono',monospace;font-size:.7rem}
+.feed-item .msg{flex:1}
+
+/* SERVICES */
+.service-grid{display:grid;gap:.5rem}
+.service-item{display:flex;justify-content:space-between;align-items:center;padding:.6rem .75rem;background:var(--card2);border-radius:8px}
+.service-item .name{font-size:.85rem;font-weight:600}
+.service-item .port{font-size:.7rem;color:var(--muted);font-family:'JetBrains Mono',monospace}
+.service-item .status-dot{width:10px;height:10px;border-radius:50%}
+.service-item .status-dot.up{background:var(--accent);box-shadow:0 0 8px var(--accent)}
+.service-item .status-dot.down{background:var(--danger)}
+
+@media(max-width:768px){
+  .stats-row{grid-template-columns:repeat(2,1fr)}
+  .dashboard{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">🔱 <span>CipherShield</span> Command Center</div>
+  <div class="status">
+    <div class="live">All Systems Live</div>
+    <span class="mono" id="clock"></span>
+  </div>
+</div>
+
+<!-- STATS ROW -->
+<div class="stats-row" id="stats-row">
+  <div class="stat"><div class="num green" id="stat-skills">-</div><div class="label">Skills Loaded</div></div>
+  <div class="stat"><div class="num blue" id="stat-tools">-</div><div class="label">Tools Ready</div></div>
+  <div class="stat"><div class="num yellow" id="stat-targets">-</div><div class="label">Targets Reconned</div></div>
+  <div class="stat"><div class="num red" id="stat-missing">-</div><div class="label">Tools Missing</div></div>
+</div>
+
+<!-- DASHBOARD GRID -->
+<div class="dashboard">
+
+  <!-- SERVICES -->
+  <div class="card">
+    <h2><span class="icon">⚡</span> Services</h2>
+    <div class="service-grid" id="services-grid"></div>
+  </div>
+
+  <!-- TOOLKIT -->
+  <div class="card">
+    <h2><span class="icon">🔧</span> Toolkit</h2>
+    <div class="tool-list" id="tool-list"></div>
+  </div>
+
+  <!-- TARGETS -->
+  <div class="card" style="grid-column:span 1">
+    <h2><span class="icon">🎯</span> Recon Targets</h2>
+    <table class="target-table">
+      <thead><tr><th>Domain</th><th>Subs</th><th>Live</th><th>URLs</th></tr></thead>
+      <tbody id="target-table"></tbody>
+    </table>
+  </div>
+
+  <!-- SKILLS -->
+  <div class="card">
+    <h2><span class="icon">🧠</span> Skills (<span id="skill-count">0</span>)</h2>
+    <div class="skill-grid" id="skill-grid"></div>
+  </div>
+
+  <!-- PROGRESS -->
+  <div class="card">
+    <h2><span class="icon">📊</span> Project Progress</h2>
+    <div class="progress-list">
+      <div class="progress-item">
+        <div class="name">🛡️ ShieldScore MVP</div>
+        <div class="bar"><div class="fill green" style="width:75%"></div></div>
+        <div class="meta">API + Frontend deployed · Next: PDF reports</div>
+      </div>
+      <div class="progress-item">
+        <div class="name">🔍 Bug Bounty Toolkit</div>
+        <div class="bar"><div class="fill blue" style="width:90%"></div></div>
+        <div class="meta">5/7 tools installed · nuclei pending</div>
+      </div>
+      <div class="progress-item">
+        <div class="name">📝 Client Outreach</div>
+        <div class="bar"><div class="fill green" style="width:40%"></div></div>
+        <div class="meta">Templates ready · Need: first outreach</div>
+      </div>
+      <div class="progress-item">
+        <div class="name">🌐 CipherShield Website</div>
+        <div class="bar"><div class="fill blue" style="width:60%"></div></div>
+        <div class="meta">Landing page built · Need: hosting + domain</div>
+      </div>
+      <div class="progress-item">
+        <div class="name">💰 First Client</div>
+        <div class="bar"><div class="fill green" style="width:10%"></div></div>
+        <div class="meta">Free scan demos ready · Need: first paying client</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ACTIVITY FEED -->
+  <div class="card">
+    <h2><span class="icon">📡</span> Activity Feed</h2>
+    <div class="feed" id="feed">
+      <div class="feed-item"><span class="time">13:32</span><span class="msg">🛡️ ShieldScore GitHub repo created</span></div>
+      <div class="feed-item"><span class="time">13:21</span><span class="msg">🌍 Decision: go global with ShieldScore</span></div>
+      <div class="feed-item"><span class="time">12:56</span><span class="msg">📦 9 ClawHub skills installed</span></div>
+      <div class="feed-item"><span class="time">12:53</span><span class="msg">📝 CipherShield landing page built</span></div>
+      <div class="feed-item"><span class="time">12:45</span><span class="msg">🔍 Chezacash.com recon complete — 43 subs, 5 live, 3 findings</span></div>
+      <div class="feed-item"><span class="time">12:36</span><span class="msg">🎯 Target locked: chezacash.com</span></div>
+      <div class="feed-item"><span class="time">11:56</span><span class="msg">✅ HackerOne account created</span></div>
+      <div class="feed-item"><span class="time">11:38</span><span class="msg">💰 Strategy: bug bounties + freelance audits</span></div>
+      <div class="feed-item"><span class="time">11:29</span><span class="msg">🔱 Session started with Sir</span></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+function updateClock() {
+  const now = new Date();
+  document.getElementById('clock').textContent = now.toISOString().slice(11,19) + ' UTC';
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+async function loadStatus() {
+  try {
+    const res = await fetch('/api/status');
+    const data = await res.json();
+
+    // Stats
+    document.getElementById('stat-skills').textContent = data.stats.total_skills;
+    document.getElementById('stat-tools').textContent = data.stats.tools_installed;
+    document.getElementById('stat-targets').textContent = data.stats.total_targets;
+    document.getElementById('stat-missing').textContent = data.stats.tools_missing;
+
+    // Services
+    const svcGrid = document.getElementById('services-grid');
+    svcGrid.innerHTML = '';
+    for (const [name, svc] of Object.entries(data.services)) {
+      svcGrid.innerHTML += `
+        <div class="service-item">
+          <div>
+            <div class="name">${name}</div>
+            <div class="port">:${svc.port}</div>
+          </div>
+          <div class="status-dot up"></div>
+        </div>`;
+    }
+
+    // Toolkit
+    const toolList = document.getElementById('tool-list');
+    toolList.innerHTML = '';
+    for (const [name, status] of Object.entries(data.toolkit)) {
+      toolList.innerHTML += `
+        <div class="tool-item">
+          <span class="name">${name}</span>
+          <span class="status-badge ${status}">${status}</span>
+        </div>`;
+    }
+
+    // Targets
+    const tbody = document.getElementById('target-table');
+    tbody.innerHTML = '';
+    for (const t of data.targets) {
+      tbody.innerHTML += `
+        <tr>
+          <td class="domain">${t.domain}</td>
+          <td><span class="badge">${t.subdomains}</span></td>
+          <td><span class="badge">${t.live_hosts}</span></td>
+          <td><span class="badge">${t.urls}</span></td>
+        </tr>`;
+    }
+    if (data.targets.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted)">No targets yet</td></tr>';
+    }
+
+    // Skills
+    document.getElementById('skill-count').textContent = data.skills.length;
+    const skillGrid = document.getElementById('skill-grid');
+    skillGrid.innerHTML = '';
+    for (const s of data.skills) {
+      skillGrid.innerHTML += `<div class="skill-tag" title="${s.description}">${s.name} v${s.version}</div>`;
+    }
+
+  } catch(e) {
+    console.error('Failed to load status:', e);
+  }
+}
+
+loadStatus();
+</script>
+
+</body>
+</html>
