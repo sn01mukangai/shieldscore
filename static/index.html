@@ -91,6 +91,7 @@ footer{text-align:center;padding:3rem 2rem;border-top:1px solid var(--border);co
 <div class="search-box">
   <div class="search-input">
     <input type="text" id="domain" placeholder="Enter a domain (e.g. example.com)" autofocus>
+    <input type="hidden" id="api-base" value="">
     <button id="scan-btn" onclick="startScan()">Scan</button>
   </div>
 </div>
@@ -141,7 +142,6 @@ const checkNames = {
   ssl: '🔒 SSL/TLS',
   headers: '🛡️ Security Headers',
   dns: '🌐 DNS & Email',
-  subdomains: '🔍 Subdomains',
   misc: '📋 Miscellaneous'
 };
 
