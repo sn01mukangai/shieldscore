@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ShieldScore — Free Security Scoring</title>
+<meta name="description" content="Get a free security score for any domain in 30 seconds. SSL, headers, DNS, vulnerabilities — all in one score.">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0a0a0f;--card:#12121a;--border:#1e1e2e;--accent:#00d084;--accent2:#0693e3;--text:#e0e0e0;--muted:#888;--danger:#cf2e2e;--warn:#fcb900}
+body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+
+/* HEADER */
+header{text-align:center;padding:4rem 2rem 2rem}
+header h1{font-size:clamp(2rem,5vw,3.5rem);font-weight:900;line-height:1.1}
+header h1 span{background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+header p{color:var(--muted);margin-top:.5rem;font-size:1.1rem}
+
+/* SEARCH */
+.search-box{max-width:600px;margin:2rem auto;padding:0 1rem}
+.search-input{display:flex;background:var(--card);border:2px solid var(--border);border-radius:12px;overflow:hidden;transition:border-color .2s}
+.search-input:focus-within{border-color:var(--accent)}
+.search-input input{flex:1;background:none;border:none;color:var(--text);font-size:1.1rem;padding:1rem 1.5rem;outline:none;font-family:inherit}
+.search-input input::placeholder{color:#555}
+.search-input button{background:linear-gradient(135deg,var(--accent),var(--accent2));border:none;color:#000;font-weight:700;padding:1rem 2rem;cursor:pointer;font-size:1rem;transition:opacity .2s}
+.search-input button:hover{opacity:.9}
+.search-input button:disabled{opacity:.5;cursor:wait}
+
+/* LOADING */
+.loading{text-align:center;padding:3rem;display:none}
+.loading.active{display:block}
+.spinner{width:50px;height:50px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 1rem}
+@keyframes spin{to{transform:rotate(360deg)}}
+.loading p{color:var(--muted)}
+
+/* RESULTS */
+.results{max-width:900px;margin:0 auto;padding:0 1rem 4rem;display:none}
+.results.active{display:block}
+
+/* SCORE DISPLAY */
+.score-hero{text-align:center;padding:3rem 2rem;margin-bottom:2rem;background:var(--card);border:1px solid var(--border);border-radius:16px}
+.score-ring{width:180px;height:180px;margin:0 auto 1.5rem;position:relative}
+.score-ring svg{width:100%;height:100%;transform:rotate(-90deg)}
+.score-ring circle{fill:none;stroke-width:8;stroke-linecap:round}
+.score-ring .bg{stroke:var(--border)}
+.score-ring .fg{stroke:var(--accent);transition:stroke-dashoffset 1.5s ease,stroke .3s}
+.score-num{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center}
+.score-num .value{font-size:3rem;font-weight:900;display:block}
+.score-num .grade{font-size:1.2rem;font-weight:700;color:var(--accent);display:block}
+.score-domain{font-size:1.3rem;font-weight:700;margin-bottom:.5rem}
+.score-summary{color:var(--muted);font-size:.95rem}
+.score-summary span{margin:0 .5rem}
+
+/* CHECK CARDS */
+.check-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem;margin-bottom:2rem}
+.check-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.5rem}
+.check-card h3{font-size:1rem;font-weight:700;margin-bottom:.25rem}
+.check-card .check-score{font-size:.85rem;color:var(--muted);margin-bottom:1rem}
+.check-card ul{list-style:none}
+.check-card li{padding:.4rem 0;font-size:.9rem;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:.5rem}
+.check-card li:last-child{border:none}
+.check-card li .icon{width:18px;text-align:center;flex-shrink:0}
+
+/* BADGE */
+.badge-section{text-align:center;padding:2rem;background:var(--card);border:1px solid var(--border);border-radius:12px}
+.badge-section h3{margin-bottom:1rem;font-size:1.1rem}
+.badge-preview{display:inline-block;padding:.5rem 1.5rem;border-radius:20px;font-weight:700;font-size:.95rem}
+.badge-preview.grade-a{background:var(--accent);color:#000}
+.badge-preview.grade-b{background:var(--accent2);color:#000}
+.badge-preview.grade-c{background:var(--warn);color:#000}
+.badge-preview.grade-d,.badge-preview.grade-f{background:var(--danger);color:#fff}
+.badge-code{margin-top:1rem;font-size:.8rem;color:var(--muted);background:var(--bg);padding:.5rem 1rem;border-radius:8px;display:inline-block}
+
+/* FOOTER */
+footer{text-align:center;padding:3rem 2rem;border-top:1px solid var(--border);color:var(--muted);font-size:.85rem}
+
+@media(max-width:600px){
+  .search-input button{padding:1rem}
+  .check-grid{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🛡️ <span>ShieldScore</span></h1>
+  <p>Free security scoring for any domain. Know your security posture in 30 seconds.</p>
+</header>
+
+<div class="search-box">
+  <div class="search-input">
+    <input type="text" id="domain" placeholder="Enter a domain (e.g. example.com)" autofocus>
+    <button id="scan-btn" onclick="startScan()">Scan</button>
+  </div>
+</div>
+
+<div class="loading" id="loading">
+  <div class="spinner"></div>
+  <p id="loading-text">Scanning your domain...</p>
+</div>
+
+<div class="results" id="results">
+  <!-- Score Hero -->
+  <div class="score-hero">
+    <div class="score-ring">
+      <svg viewBox="0 0 200 200">
+        <circle class="bg" cx="100" cy="100" r="90"/>
+        <circle class="fg" id="score-ring-fg" cx="100" cy="100" r="90"
+                stroke-dasharray="565.48" stroke-dashoffset="565.48"/>
+      </svg>
+      <div class="score-num">
+        <span class="value" id="score-value">0</span>
+        <span class="grade" id="score-grade">F</span>
+      </div>
+    </div>
+    <div class="score-domain" id="result-domain"></div>
+    <div class="score-summary" id="result-summary"></div>
+  </div>
+
+  <!-- Check Cards -->
+  <div class="check-grid" id="check-grid"></div>
+
+  <!-- Badge -->
+  <div class="badge-section">
+    <h3>Share Your Score</h3>
+    <div class="badge-preview" id="badge-preview">ShieldScore: 0</div>
+    <div class="badge-code" id="badge-code"></div>
+  </div>
+</div>
+
+<footer>
+  <p>🛡️ ShieldScore — Free Security Scoring for Any Domain</p>
+  <p style="margin-top:.5rem">Built by CipherShield Security</p>
+</footer>
+
+<script>
+const CIRCUMFERENCE = 2 * Math.PI * 90; // ~565.48
+const statusIcons = { pass: '✅', warn: '⚠️', fail: '❌' };
+const checkNames = {
+  ssl: '🔒 SSL/TLS',
+  headers: '🛡️ Security Headers',
+  dns: '🌐 DNS & Email',
+  subdomains: '🔍 Subdomains',
+  misc: '📋 Miscellaneous'
+};
+
+function startScan() {
+  const domain = document.getElementById('domain').value.trim().replace(/^https?:\/\//, '').replace(/\/$/, '');
+  if (!domain) return;
+
+  document.getElementById('results').classList.remove('active');
+  document.getElementById('loading').classList.add('active');
+  document.getElementById('scan-btn').disabled = true;
+  document.getElementById('loading-text').textContent = `Scanning ${domain}...`;
+
+  fetch('/api/scan', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ domain })
+  })
+  .then(r => r.json())
+  .then(data => {
+    document.getElementById('loading').classList.remove('active');
+    document.getElementById('scan-btn').disabled = false;
+    renderResults(data);
+  })
+  .catch(err => {
+    document.getElementById('loading').classList.remove('active');
+    document.getElementById('scan-btn').disabled = false;
+    alert('Scan failed: ' + err.message);
+  });
+}
+
+function renderResults(data) {
+  // Score animation
+  const ring = document.getElementById('score-ring-fg');
+  const offset = CIRCUMFERENCE - (data.score / 100) * CIRCUMFERENCE;
+
+  // Color based on grade
+  let color = 'var(--accent)';
+  if (data.score < 50) color = 'var(--danger)';
+  else if (data.score < 70) color = 'var(--warn)';
+
+  ring.style.stroke = color;
+  setTimeout(() => { ring.style.strokeDashoffset = offset; }, 100);
+
+  // Score text animation
+  const scoreEl = document.getElementById('score-value');
+  animateNumber(scoreEl, 0, data.score, 1500);
+
+  document.getElementById('score-grade').textContent = data.grade;
+  document.getElementById('score-grade').style.color = color;
+
+  // Domain & summary
+  document.getElementById('result-domain').textContent = data.domain;
+  document.getElementById('result-summary').innerHTML =
+    `✅ ${data.summary.passed} passed &nbsp; ⚠️ ${data.summary.warnings} warnings &nbsp; ❌ ${data.summary.failures} failures`;
+
+  // Check cards
+  const grid = document.getElementById('check-grid');
+  grid.innerHTML = '';
+
+  for (const [key, check] of Object.entries(data.checks)) {
+    const card = document.createElement('div');
+    card.className = 'check-card';
+
+    let items = check.details.map(d =>
+      `<li><span class="icon">${statusIcons[d.status]}</span>${d.text}</li>`
+    ).join('');
+
+    card.innerHTML = `
+      <h3>${checkNames[key] || key}</h3>
+      <div class="check-score">${check.score}/${check.max} points</div>
+      <ul>${items}</ul>
+    `;
+    grid.appendChild(card);
+  }
+
+  // Badge
+  const badgeEl = document.getElementById('badge-preview');
+  badgeEl.textContent = `ShieldScore: ${data.score} (${data.grade})`;
+  badgeEl.className = 'badge-preview';
+  if (data.score >= 80) badgeEl.classList.add('grade-a');
+  else if (data.score >= 70) badgeEl.classList.add('grade-b');
+  else if (data.score >= 50) badgeEl.classList.add('grade-c');
+  else if (data.score >= 40) badgeEl.classList.add('grade-d');
+  else badgeEl.classList.add('grade-f');
+
+  document.getElementById('badge-code').textContent =
+    `[![ShieldScore](https://shieldscore.com/badge/${data.domain})]`;
+
+  document.getElementById('results').classList.add('active');
+  document.getElementById('results').scrollIntoView({ behavior: 'smooth' });
+}
+
+function animateNumber(el, from, to, duration) {
+  const start = performance.now();
+  function update(now) {
+    const elapsed = now - start;
+    const progress = Math.min(elapsed / duration, 1);
+    el.textContent = Math.round(from + (to - from) * progress);
+    if (progress < 1) requestAnimationFrame(update);
+  }
+  requestAnimationFrame(update);
+}
+
+// Enter key
+document.getElementById('domain').addEventListener('keydown', e => {
+  if (e.key === 'Enter') startScan();
+});
+</script>
+
+</body>
+</html>
