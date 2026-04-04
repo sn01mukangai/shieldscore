@@ -11,10 +11,79 @@ import ssl
 import socket
 import hashlib
 import time
+import os
+import threading
+from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime
 from flask import Flask, jsonify, request, send_from_directory
 
 app = Flask(__name__, static_folder='static', static_url_path='/static')
+
+# ─── API Security Controls ───
+
+def _get_int_env(name, default):
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _get_bool_env(name, default):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _load_api_keys():
+    raw_keys = os.getenv("API_KEYS", "") or os.getenv("API_KEY", "")
+    return {k.strip() for k in raw_keys.split(",") if k.strip()}
+
+
+AUTH_REQUIRED = _get_bool_env("API_AUTH_REQUIRED", True)
+API_KEYS = _load_api_keys()
+IP_RATE_LIMIT = _get_int_env("SCAN_RATE_LIMIT_IP", 10)
+DOMAIN_RATE_LIMIT = _get_int_env("SCAN_RATE_LIMIT_DOMAIN", 5)
+RATE_WINDOW_SECONDS = _get_int_env("SCAN_RATE_WINDOW_SECONDS", 60)
+SCAN_TIMEOUT_SECONDS = _get_int_env("SCAN_TIMEOUT_SECONDS", 90)
+MAX_CONCURRENT_SCANS = _get_int_env("MAX_CONCURRENT_SCANS", 4)
+
+_rate_lock = threading.Lock()
+_ip_hits = defaultdict(deque)
+_domain_hits = defaultdict(deque)
+_scan_slots = threading.BoundedSemaphore(value=MAX_CONCURRENT_SCANS)
+_scan_executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_SCANS)
+
+
+def _extract_api_token():
+    key = request.headers.get("X-API-Key", "").strip()
+    if key:
+        return key
+    auth = request.headers.get("Authorization", "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return ""
+
+
+def _authorization_error():
+    return jsonify({
+        "error": "authentication_required",
+        "message": "Provide a valid X-API-Key header or Bearer token.",
+    }), 401
+
+
+def _check_rate_limit(bucket, key, limit):
+    now = time.time()
+    with _rate_lock:
+        entries = bucket[key]
+        while entries and now - entries[0] >= RATE_WINDOW_SECONDS:
+            entries.popleft()
+        if len(entries) >= limit:
+            retry_after = max(1, int(RATE_WINDOW_SECONDS - (now - entries[0])))
+            return retry_after
+        entries.append(now)
+    return None
 
 # ─── Scanner Engine ───
 
@@ -293,14 +362,78 @@ def index():
 
 @app.route("/api/scan", methods=["POST"])
 def api_scan():
-    data = request.get_json()
+    if AUTH_REQUIRED:
+        if not API_KEYS:
+            return jsonify({
+                "error": "auth_misconfigured",
+                "message": "API_AUTH_REQUIRED is enabled but no API_KEY/API_KEYS configured.",
+            }), 503
+        token = _extract_api_token()
+        if not token or token not in API_KEYS:
+            return _authorization_error()
+
+    data = request.get_json(silent=True) or {}
     domain = data.get("domain", "").strip()
 
     if not domain:
         return jsonify({"error": "domain is required"}), 400
 
-    results = scan_domain(domain)
-    return jsonify(results)
+    ip_address = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+    normalized_domain = domain.replace("https://", "").replace("http://", "").rstrip("/").split("/")[0].lower()
+
+    ip_retry = _check_rate_limit(_ip_hits, ip_address, IP_RATE_LIMIT)
+    if ip_retry is not None:
+        payload = {
+            "error": "rate_limited",
+            "scope": "ip",
+            "limit": IP_RATE_LIMIT,
+            "window_seconds": RATE_WINDOW_SECONDS,
+            "retry_after_seconds": ip_retry,
+        }
+        response = jsonify(payload)
+        response.status_code = 429
+        response.headers["Retry-After"] = str(ip_retry)
+        return response
+
+    domain_retry = _check_rate_limit(_domain_hits, normalized_domain, DOMAIN_RATE_LIMIT)
+    if domain_retry is not None:
+        payload = {
+            "error": "rate_limited",
+            "scope": "domain",
+            "limit": DOMAIN_RATE_LIMIT,
+            "window_seconds": RATE_WINDOW_SECONDS,
+            "retry_after_seconds": domain_retry,
+        }
+        response = jsonify(payload)
+        response.status_code = 429
+        response.headers["Retry-After"] = str(domain_retry)
+        return response
+
+    if not _scan_slots.acquire(blocking=False):
+        response = jsonify({
+            "error": "scan_capacity_reached",
+            "message": "Too many concurrent scans in progress.",
+            "max_concurrent_scans": MAX_CONCURRENT_SCANS,
+            "retry_after_seconds": 2,
+        })
+        response.status_code = 429
+        response.headers["Retry-After"] = "2"
+        return response
+
+    try:
+        future = _scan_executor.submit(scan_domain, normalized_domain)
+        try:
+            results = future.result(timeout=SCAN_TIMEOUT_SECONDS)
+            return jsonify(results)
+        except FuturesTimeoutError:
+            future.cancel()
+            return jsonify({
+                "error": "scan_timeout",
+                "message": "Scan exceeded configured timeout ceiling.",
+                "timeout_seconds": SCAN_TIMEOUT_SECONDS,
+            }), 504
+    finally:
+        _scan_slots.release()
 
 
 @app.route("/api/health")

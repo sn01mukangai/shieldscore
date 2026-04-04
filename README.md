@@ -63,6 +63,37 @@ GET  /api/score/{domain} # Quick score lookup
 GET  /api/health        # Health check
 ```
 
+## API Security
+
+ShieldScore supports lightweight API hardening controls for `POST /api/scan`:
+
+- **API authentication** (required by default):
+  - Send `X-API-Key: <token>` **or** `Authorization: Bearer <token>`.
+  - Configure valid tokens with `API_KEY` (single token) or `API_KEYS` (comma-separated list).
+  - Toggle enforcement with `API_AUTH_REQUIRED` (`true` by default).
+- **Rate limiting**:
+  - Per-IP: `SCAN_RATE_LIMIT_IP` requests per window (default `10`).
+  - Per-domain: `SCAN_RATE_LIMIT_DOMAIN` requests per window (default `5`).
+  - Window size: `SCAN_RATE_WINDOW_SECONDS` (default `60`).
+  - Limit responses return HTTP `429` plus `Retry-After` and `retry_after_seconds`.
+- **Worker starvation protection**:
+  - Request timeout ceiling: `SCAN_TIMEOUT_SECONDS` (default `90`).
+  - Concurrent scan cap: `MAX_CONCURRENT_SCANS` (default `4`).
+  - If scan capacity is exhausted, API returns HTTP `429`.
+  - If a scan exceeds timeout, API returns HTTP `504`.
+
+Example:
+
+```bash
+export API_AUTH_REQUIRED=true
+export API_KEYS="dev-key-1,dev-key-2"
+export SCAN_RATE_LIMIT_IP=10
+export SCAN_RATE_LIMIT_DOMAIN=5
+export SCAN_RATE_WINDOW_SECONDS=60
+export SCAN_TIMEOUT_SECONDS=90
+export MAX_CONCURRENT_SCANS=4
+```
+
 ## Contributing
 
 1. Fork the repo

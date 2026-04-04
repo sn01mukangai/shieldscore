@@ -8,9 +8,70 @@ import json
 import ssl
 import socket
 import re
+import os
+import time
+import threading
+from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime
 from urllib.request import urlopen, Request
 from urllib.error import URLError
+
+
+def _get_int_env(name, default):
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _get_bool_env(name, default):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _load_api_keys():
+    raw_keys = os.getenv("API_KEYS", "") or os.getenv("API_KEY", "")
+    return {k.strip() for k in raw_keys.split(",") if k.strip()}
+
+
+AUTH_REQUIRED = _get_bool_env("API_AUTH_REQUIRED", True)
+API_KEYS = _load_api_keys()
+IP_RATE_LIMIT = _get_int_env("SCAN_RATE_LIMIT_IP", 10)
+DOMAIN_RATE_LIMIT = _get_int_env("SCAN_RATE_LIMIT_DOMAIN", 5)
+RATE_WINDOW_SECONDS = _get_int_env("SCAN_RATE_WINDOW_SECONDS", 60)
+SCAN_TIMEOUT_SECONDS = _get_int_env("SCAN_TIMEOUT_SECONDS", 90)
+MAX_CONCURRENT_SCANS = _get_int_env("MAX_CONCURRENT_SCANS", 4)
+
+_rate_lock = threading.Lock()
+_ip_hits = defaultdict(deque)
+_domain_hits = defaultdict(deque)
+_scan_slots = threading.BoundedSemaphore(value=MAX_CONCURRENT_SCANS)
+_scan_executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_SCANS)
+
+
+def _extract_token(headers):
+    key = (headers.get("X-API-Key") or "").strip()
+    if key:
+        return key
+    auth = (headers.get("Authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return ""
+
+
+def _check_rate_limit(bucket, key, limit):
+    now = time.time()
+    with _rate_lock:
+        entries = bucket[key]
+        while entries and now - entries[0] >= RATE_WINDOW_SECONDS:
+            entries.popleft()
+        if len(entries) >= limit:
+            return max(1, int(RATE_WINDOW_SECONDS - (now - entries[0])))
+        entries.append(now)
+    return None
 
 def check_ssl(domain):
     result = {"score": 0, "max": 25, "details": []}
@@ -221,36 +282,100 @@ def scan(domain):
 
 
 class handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
+    def _send_json(self, status, payload, extra_headers=None):
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
+        if extra_headers:
+            for k, v in extra_headers.items():
+                self.send_header(k, v)
         self.end_headers()
-        self.wfile.write(json.dumps({"status": "ok", "version": "1.0.0"}).encode())
+        self.wfile.write(json.dumps(payload).encode())
+
+    def do_GET(self):
+        self._send_json(200, {"status": "ok", "version": "1.0.0"})
 
     def do_POST(self):
+        if AUTH_REQUIRED:
+            if not API_KEYS:
+                self._send_json(503, {
+                    "error": "auth_misconfigured",
+                    "message": "API_AUTH_REQUIRED is enabled but no API_KEY/API_KEYS configured.",
+                })
+                return
+            token = _extract_token(self.headers)
+            if not token or token not in API_KEYS:
+                self._send_json(401, {
+                    "error": "authentication_required",
+                    "message": "Provide a valid X-API-Key header or Bearer token.",
+                })
+                return
+
         content_length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(content_length)
-        data = json.loads(body)
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            self._send_json(400, {"error": "invalid_json"})
+            return
         domain = data.get("domain", "")
 
         if not domain:
-            self.send_response(400)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"error": "domain required"}).encode())
+            self._send_json(400, {"error": "domain required"})
             return
 
-        results = scan(domain)
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(json.dumps(results).encode())
+        normalized_domain = domain.replace("https://", "").replace("http://", "").rstrip("/").split("/")[0].lower()
+        ip_address = (self.headers.get("X-Forwarded-For") or self.client_address[0]).split(",")[0].strip()
+
+        ip_retry = _check_rate_limit(_ip_hits, ip_address, IP_RATE_LIMIT)
+        if ip_retry is not None:
+            self._send_json(429, {
+                "error": "rate_limited",
+                "scope": "ip",
+                "limit": IP_RATE_LIMIT,
+                "window_seconds": RATE_WINDOW_SECONDS,
+                "retry_after_seconds": ip_retry,
+            }, {"Retry-After": str(ip_retry)})
+            return
+
+        domain_retry = _check_rate_limit(_domain_hits, normalized_domain, DOMAIN_RATE_LIMIT)
+        if domain_retry is not None:
+            self._send_json(429, {
+                "error": "rate_limited",
+                "scope": "domain",
+                "limit": DOMAIN_RATE_LIMIT,
+                "window_seconds": RATE_WINDOW_SECONDS,
+                "retry_after_seconds": domain_retry,
+            }, {"Retry-After": str(domain_retry)})
+            return
+
+        if not _scan_slots.acquire(blocking=False):
+            self._send_json(429, {
+                "error": "scan_capacity_reached",
+                "message": "Too many concurrent scans in progress.",
+                "max_concurrent_scans": MAX_CONCURRENT_SCANS,
+                "retry_after_seconds": 2,
+            }, {"Retry-After": "2"})
+            return
+
+        try:
+            future = _scan_executor.submit(scan, normalized_domain)
+            try:
+                results = future.result(timeout=SCAN_TIMEOUT_SECONDS)
+                self._send_json(200, results)
+            except FuturesTimeoutError:
+                future.cancel()
+                self._send_json(504, {
+                    "error": "scan_timeout",
+                    "message": "Scan exceeded configured timeout ceiling.",
+                    "timeout_seconds": SCAN_TIMEOUT_SECONDS,
+                })
+        finally:
+            _scan_slots.release()
 
     def do_OPTIONS(self):
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
         self.end_headers()
