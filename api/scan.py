@@ -7,10 +7,10 @@ from http.server import BaseHTTPRequestHandler
 import json
 import ssl
 import socket
-import re
 from datetime import datetime
 from urllib.request import urlopen, Request
 from urllib.error import URLError
+from core.validation import DomainValidationError, validate_domain_input
 
 def check_ssl(domain):
     result = {"score": 0, "max": 25, "details": []}
@@ -191,7 +191,7 @@ def get_grade(score):
 
 
 def scan(domain):
-    domain = domain.replace("https://", "").replace("http://", "").rstrip("/").split("/")[0]
+    domain = validate_domain_input(domain)
 
     checks = {
         "ssl": check_ssl(domain),
@@ -231,14 +231,31 @@ class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         content_length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(content_length)
-        data = json.loads(body)
+        try:
+            data = json.loads(body or b"{}")
+        except json.JSONDecodeError:
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "invalid JSON body", "code": "invalid_domain"}).encode())
+            return
+
         domain = data.get("domain", "")
 
         if not domain:
             self.send_response(400)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"error": "domain required"}).encode())
+            self.wfile.write(json.dumps({"error": "domain required", "code": "invalid_domain"}).encode())
+            return
+
+        try:
+            domain = validate_domain_input(domain)
+        except DomainValidationError as err:
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(err.to_dict()).encode())
             return
 
         results = scan(domain)
