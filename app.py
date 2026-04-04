@@ -6,13 +6,13 @@ MVP: scans any domain and returns a 0-100 security score.
 
 import subprocess
 import json
-import re
 import ssl
 import socket
 import hashlib
 import time
 from datetime import datetime
 from flask import Flask, jsonify, request, send_from_directory
+from core.validation import DomainValidationError, validate_domain_input
 
 app = Flask(__name__, static_folder='static', static_url_path='/static')
 
@@ -249,7 +249,7 @@ def get_grade(score):
 
 def scan_domain(domain):
     """Run full scan on a domain and return results."""
-    domain = domain.replace("https://", "").replace("http://", "").rstrip("/")
+    domain = validate_domain_input(domain)
 
     results = {
         "domain": domain,
@@ -293,11 +293,16 @@ def index():
 
 @app.route("/api/scan", methods=["POST"])
 def api_scan():
-    data = request.get_json()
-    domain = data.get("domain", "").strip()
+    data = request.get_json(silent=True) or {}
+    domain = data.get("domain", "")
 
     if not domain:
-        return jsonify({"error": "domain is required"}), 400
+        return jsonify({"error": "domain is required", "code": "invalid_domain"}), 400
+
+    try:
+        domain = validate_domain_input(domain)
+    except DomainValidationError as err:
+        return jsonify(err.to_dict()), 400
 
     results = scan_domain(domain)
     return jsonify(results)
