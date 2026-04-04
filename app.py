@@ -4,19 +4,30 @@ ShieldScore — Free Security Scoring API
 MVP: scans any domain and returns a 0-100 security score.
 """
 
-import subprocess
-import json
-import re
-import ssl
 import socket
-import hashlib
-import time
+import ssl
 from datetime import datetime
+
+import dns.exception
+import dns.flags
+import dns.rdatatype
+import dns.resolver
+import requests
 from flask import Flask, jsonify, request, send_from_directory
+
+from scanner.subdomain_provider import SubdomainProvider
 
 app = Flask(__name__, static_folder='static', static_url_path='/static')
 
+
 # ─── Scanner Engine ───
+
+def _add_detail(result, status, text, error_code=None):
+    entry = {"status": status, "text": text}
+    if error_code:
+        entry["error_code"] = error_code
+    result["details"].append(entry)
+
 
 def check_ssl(domain, port=443):
     """Check SSL/TLS configuration."""
@@ -30,50 +41,49 @@ def check_ssl(domain, port=443):
             cert = s.getpeercert()
             protocol = s.version()
 
-            # Certificate validity
             not_after = datetime.strptime(cert['notAfter'], '%b %d %H:%M:%S %Y %Z')
             days_left = (not_after - datetime.utcnow()).days
 
             if days_left > 90:
                 result["score"] += 10
-                result["details"].append({"status": "pass", "text": f"Certificate valid ({days_left} days remaining)"})
+                _add_detail(result, "pass", f"Certificate valid ({days_left} days remaining)")
             elif days_left > 30:
                 result["score"] += 5
-                result["details"].append({"status": "warn", "text": f"Certificate expiring soon ({days_left} days)"})
+                _add_detail(result, "warn", f"Certificate expiring soon ({days_left} days)")
             else:
-                result["details"].append({"status": "fail", "text": f"Certificate expiring in {days_left} days"})
+                _add_detail(result, "fail", f"Certificate expiring in {days_left} days")
 
-            # Protocol version
             if protocol in ('TLSv1.3',):
                 result["score"] += 10
-                result["details"].append({"status": "pass", "text": f"Protocol: {protocol} (excellent)"})
+                _add_detail(result, "pass", f"Protocol: {protocol} (excellent)")
             elif protocol in ('TLSv1.2',):
                 result["score"] += 7
-                result["details"].append({"status": "warn", "text": f"Protocol: {protocol} (consider upgrading to TLS 1.3)"})
+                _add_detail(result, "warn", f"Protocol: {protocol} (consider upgrading to TLS 1.3)")
             else:
-                result["details"].append({"status": "fail", "text": f"Protocol: {protocol} (insecure)"})
+                _add_detail(result, "fail", f"Protocol: {protocol} (insecure)")
 
-            # Cipher strength
             cipher = s.cipher()
             if cipher and cipher[2] >= 256:
                 result["score"] += 5
-                result["details"].append({"status": "pass", "text": f"Strong cipher: {cipher[0]} ({cipher[2]}-bit)"})
+                _add_detail(result, "pass", f"Strong cipher: {cipher[0]} ({cipher[2]}-bit)")
             elif cipher and cipher[2] >= 128:
                 result["score"] += 3
-                result["details"].append({"status": "warn", "text": f"Cipher: {cipher[0]} ({cipher[2]}-bit)"})
+                _add_detail(result, "warn", f"Cipher: {cipher[0]} ({cipher[2]}-bit)")
             else:
-                result["details"].append({"status": "fail", "text": f"Weak cipher: {cipher[0] if cipher else 'unknown'}"})
+                _add_detail(result, "fail", f"Weak cipher: {cipher[0] if cipher else 'unknown'}")
 
-    except ssl.SSLCertVerificationError as e:
-        result["details"].append({"status": "fail", "text": f"Certificate error: {e.verify_message}"})
-    except Exception as e:
-        result["details"].append({"status": "fail", "text": f"SSL check failed: {str(e)}"})
+    except ssl.SSLCertVerificationError:
+        _add_detail(result, "fail", "Certificate verification failed", error_code="tls_error")
+    except socket.timeout:
+        _add_detail(result, "fail", "SSL check timed out", error_code="timeout")
+    except OSError:
+        _add_detail(result, "fail", "SSL check failed", error_code="network_error")
 
     return result
 
 
 def check_headers(domain):
-    """Check HTTP security headers."""
+    """Check HTTP security headers with redirect-aware requests."""
     result = {"score": 0, "max": 30, "details": []}
 
     required_headers = {
@@ -86,164 +96,184 @@ def check_headers(domain):
         "x-xss-protection": {"points": 2, "name": "X-XSS-Protection"},
     }
 
-    try:
-        proc = subprocess.run(
-            ["curl", "-sI", "--connect-timeout", "10", "-L", f"https://www.{domain}"],
-            capture_output=True, text=True, timeout=15
-        )
-        headers_text = proc.stdout.lower()
+    session = requests.Session()
+    session.max_redirects = 10
 
-        for header, info in required_headers.items():
-            if header in headers_text:
-                result["score"] += info["points"]
-                result["details"].append({"status": "pass", "text": f"{info['name']} present"})
-            else:
-                result["details"].append({"status": "fail", "text": f"{info['name']} missing"})
+    response = None
+    for target in (f"https://{domain}", f"https://www.{domain}"):
+        try:
+            response = session.get(target, timeout=10, allow_redirects=True)
+            break
+        except requests.exceptions.Timeout:
+            _add_detail(result, "fail", f"Timed out fetching {target}", error_code="timeout")
+            return result
+        except requests.exceptions.RequestException:
+            continue
 
-        # Check for info leakage
-        if "server:" in headers_text:
-            server = [l for l in proc.stdout.split('\n') if l.lower().startswith('server:')][0] if any(l.lower().startswith('server:') for l in proc.stdout.split('\n')) else ""
-            if any(v in server.lower() for v in ['apache', 'nginx', 'iis']):
-                result["details"].append({"status": "warn", "text": f"Server version exposed: {server.strip()}"})
+    if response is None:
+        _add_detail(result, "fail", "Headers check failed", error_code="network_error")
+        return result
 
-    except Exception as e:
-        result["details"].append({"status": "fail", "text": f"Headers check failed: {str(e)}"})
+    headers = {k.lower(): v for k, v in response.headers.items()}
+
+    for header, info in required_headers.items():
+        if header in headers:
+            result["score"] += info["points"]
+            _add_detail(result, "pass", f"{info['name']} present")
+        else:
+            _add_detail(result, "fail", f"{info['name']} missing")
+
+    server = headers.get("server", "")
+    if any(v in server.lower() for v in ['apache', 'nginx', 'iis']):
+        _add_detail(result, "warn", f"Server version exposed: {server}")
 
     return result
 
 
+def _resolve_txt_records(target, resolver):
+    answers = resolver.resolve(target, "TXT")
+    return [b"".join(rdata.strings).decode("utf-8", errors="ignore") for rdata in answers]
+
+
 def check_dns(domain):
-    """Check DNS records (SPF, DKIM, DMARC)."""
+    """Check DNS records (SPF, DMARC, DNSSEC) using dnspython."""
     result = {"score": 0, "max": 15, "details": []}
+    resolver = dns.resolver.Resolver()
+    resolver.lifetime = 10
 
     checks = [
-        {"name": "SPF", "type": "txt", "match": "v=spf1", "points": 5},
-        {"name": "DMARC", "type": "txt", "match": "v=DMARC1", "points": 5, "prefix": "_dmarc."},
+        {"name": "SPF", "match": "v=spf1", "points": 5, "target": domain},
+        {"name": "DMARC", "match": "v=dmarc1", "points": 5, "target": f"_dmarc.{domain}"},
     ]
 
     for check in checks:
-        prefix = check.get("prefix", "")
-        target = f"{prefix}{domain}"
         try:
-            proc = subprocess.run(
-                ["dig", "+short", "-t", check["type"], target],
-                capture_output=True, text=True, timeout=10
-            )
-            output = proc.stdout.strip()
-            if check["match"] in output:
+            txt_values = _resolve_txt_records(check["target"], resolver)
+            if any(check["match"] in txt.lower() for txt in txt_values):
                 result["score"] += check["points"]
-                result["details"].append({"status": "pass", "text": f"{check['name']} record found"})
+                _add_detail(result, "pass", f"{check['name']} record found")
             else:
-                result["details"].append({"status": "fail", "text": f"{check['name']} record not found"})
-        except Exception:
-            result["details"].append({"status": "fail", "text": f"{check['name']} check failed"})
+                _add_detail(result, "fail", f"{check['name']} record not found")
+        except dns.resolver.NoAnswer:
+            _add_detail(result, "fail", f"{check['name']} record not found")
+        except dns.exception.Timeout:
+            _add_detail(result, "fail", f"{check['name']} lookup timed out", error_code="timeout")
+        except dns.resolver.DNSException:
+            _add_detail(result, "fail", f"{check['name']} lookup failed", error_code="dns_error")
 
-    # DNSSEC check
     try:
-        proc = subprocess.run(
-            ["dig", "+dnssec", "+short", domain],
-            capture_output=True, text=True, timeout=10
+        dnssec_resolver = dns.resolver.Resolver()
+        dnssec_resolver.lifetime = 10
+        dnssec_resolver.use_edns(edns=0, ednsflags=dns.flags.DO, payload=1232)
+        answer = dnssec_resolver.resolve(domain, "A", raise_on_no_answer=False)
+        has_rrsig = any(
+            rrset.rdtype == dns.rdatatype.RRSIG
+            for rrset in answer.response.answer
         )
-        if "RRSIG" in proc.stdout:
+        if has_rrsig:
             result["score"] += 5
-            result["details"].append({"status": "pass", "text": "DNSSEC enabled"})
+            _add_detail(result, "pass", "DNSSEC enabled")
         else:
-            result["details"].append({"status": "warn", "text": "DNSSEC not detected"})
-    except Exception:
-        result["details"].append({"status": "warn", "text": "DNSSEC check failed"})
+            _add_detail(result, "warn", "DNSSEC not detected")
+    except dns.exception.Timeout:
+        _add_detail(result, "warn", "DNSSEC lookup timed out", error_code="timeout")
+    except dns.resolver.DNSException:
+        _add_detail(result, "warn", "DNSSEC check failed", error_code="dns_error")
 
     return result
 
 
 def check_subdomains(domain):
-    """Quick subdomain enumeration."""
+    """Quick subdomain enumeration via optional adapter."""
     result = {"score": 0, "max": 15, "details": [], "subdomains": []}
+    provider = SubdomainProvider()
+    provider_result = provider.enumerate(domain)
 
-    try:
-        proc = subprocess.run(
-            ["subfinder", "-d", domain, "-silent", "-timeout", "30"],
-            capture_output=True, text=True, timeout=60
-        )
-        subs = [s.strip() for s in proc.stdout.strip().split('\n') if s.strip()]
-        result["subdomains"] = subs[:20]  # Cap at 20 for display
+    if provider_result.error_code == "tool_missing":
+        _add_detail(result, "warn", "subfinder not installed — skipping", error_code="tool_missing")
+        return result
+    if provider_result.error_code == "timeout":
+        _add_detail(result, "warn", "Subdomain check timed out", error_code="timeout")
+        return result
+    if provider_result.error_code:
+        _add_detail(result, "warn", "Subdomain check failed", error_code=provider_result.error_code)
+        return result
 
-        count = len(subs)
-        if count < 10:
-            result["score"] += 15
-            result["details"].append({"status": "pass", "text": f"Small attack surface ({count} subdomains)"})
-        elif count < 30:
-            result["score"] += 10
-            result["details"].append({"status": "warn", "text": f"Moderate attack surface ({count} subdomains)"})
-        elif count < 100:
-            result["score"] += 5
-            result["details"].append({"status": "warn", "text": f"Large attack surface ({count} subdomains)"})
-        else:
-            result["details"].append({"status": "fail", "text": f"Very large attack surface ({count} subdomains)"})
+    subs = provider_result.subdomains
+    result["subdomains"] = subs[:20]
+    count = len(subs)
 
-    except FileNotFoundError:
-        result["details"].append({"status": "warn", "text": "subfinder not installed — skipping"})
-    except Exception as e:
-        result["details"].append({"status": "warn", "text": f"Subdomain check failed: {str(e)}"})
+    if count < 10:
+        result["score"] += 15
+        _add_detail(result, "pass", f"Small attack surface ({count} subdomains)")
+    elif count < 30:
+        result["score"] += 10
+        _add_detail(result, "warn", f"Moderate attack surface ({count} subdomains)")
+    elif count < 100:
+        result["score"] += 5
+        _add_detail(result, "warn", f"Large attack surface ({count} subdomains)")
+    else:
+        _add_detail(result, "fail", f"Very large attack surface ({count} subdomains)")
 
     return result
 
 
 def check_misc(domain):
-    """Miscellaneous security checks."""
+    """Miscellaneous security checks using requests."""
     result = {"score": 0, "max": 15, "details": []}
 
-    # Check if HTTPS redirects HTTP
     try:
-        proc = subprocess.run(
-            ["curl", "-sI", "--connect-timeout", "5", f"http://{domain}"],
-            capture_output=True, text=True, timeout=10
-        )
-        if "location:" in proc.stdout.lower() and "https://" in proc.stdout.lower():
+        response = requests.get(f"http://{domain}", timeout=5, allow_redirects=False)
+        location = response.headers.get("Location", "")
+        if response.is_redirect and location.lower().startswith("https://"):
             result["score"] += 5
-            result["details"].append({"status": "pass", "text": "HTTP → HTTPS redirect enabled"})
+            _add_detail(result, "pass", "HTTP → HTTPS redirect enabled")
         else:
-            result["details"].append({"status": "fail", "text": "No HTTP → HTTPS redirect"})
-    except Exception:
-        result["details"].append({"status": "warn", "text": "HTTP redirect check failed"})
+            _add_detail(result, "fail", "No HTTP → HTTPS redirect")
+    except requests.exceptions.Timeout:
+        _add_detail(result, "warn", "HTTP redirect check timed out", error_code="timeout")
+    except requests.exceptions.RequestException:
+        _add_detail(result, "warn", "HTTP redirect check failed", error_code="network_error")
 
-    # Check robots.txt
     try:
-        proc = subprocess.run(
-            ["curl", "-s", "--connect-timeout", "5", f"https://{domain}/robots.txt"],
-            capture_output=True, text=True, timeout=10
-        )
-        if proc.returncode == 0 and "Disallow" in proc.stdout:
+        response = requests.get(f"https://{domain}/robots.txt", timeout=5)
+        if response.ok and "Disallow" in response.text:
             result["score"] += 5
-            result["details"].append({"status": "pass", "text": "robots.txt configured"})
+            _add_detail(result, "pass", "robots.txt configured")
         else:
-            result["details"].append({"status": "warn", "text": "robots.txt not found or empty"})
-    except Exception:
-        result["details"].append({"status": "warn", "text": "robots.txt check failed"})
+            _add_detail(result, "warn", "robots.txt not found or empty")
+    except requests.exceptions.Timeout:
+        _add_detail(result, "warn", "robots.txt check timed out", error_code="timeout")
+    except requests.exceptions.RequestException:
+        _add_detail(result, "warn", "robots.txt check failed", error_code="network_error")
 
-    # Check security.txt
     try:
-        proc = subprocess.run(
-            ["curl", "-s", "--connect-timeout", "5", f"https://{domain}/.well-known/security.txt"],
-            capture_output=True, text=True, timeout=10
-        )
-        if proc.returncode == 0 and "Contact:" in proc.stdout:
+        response = requests.get(f"https://{domain}/.well-known/security.txt", timeout=5)
+        if response.ok and "Contact:" in response.text:
             result["score"] += 5
-            result["details"].append({"status": "pass", "text": "security.txt present (responsible disclosure)"})
+            _add_detail(result, "pass", "security.txt present (responsible disclosure)")
         else:
-            result["details"].append({"status": "warn", "text": "security.txt not found — consider adding one"})
-    except Exception:
-        result["details"].append({"status": "warn", "text": "security.txt check failed"})
+            _add_detail(result, "warn", "security.txt not found — consider adding one")
+    except requests.exceptions.Timeout:
+        _add_detail(result, "warn", "security.txt check timed out", error_code="timeout")
+    except requests.exceptions.RequestException:
+        _add_detail(result, "warn", "security.txt check failed", error_code="network_error")
 
     return result
 
 
 def get_grade(score):
     """Convert numeric score to letter grade."""
-    if score >= 90: return "A+"
-    if score >= 80: return "A"
-    if score >= 70: return "B"
-    if score >= 60: return "C"
-    if score >= 50: return "D"
+    if score >= 90:
+        return "A+"
+    if score >= 80:
+        return "A"
+    if score >= 70:
+        return "B"
+    if score >= 60:
+        return "C"
+    if score >= 50:
+        return "D"
     return "F"
 
 
@@ -257,14 +287,12 @@ def scan_domain(domain):
         "checks": {}
     }
 
-    # Run all checks
     results["checks"]["ssl"] = check_ssl(domain)
     results["checks"]["headers"] = check_headers(domain)
     results["checks"]["dns"] = check_dns(domain)
     results["checks"]["subdomains"] = check_subdomains(domain)
     results["checks"]["misc"] = check_misc(domain)
 
-    # Calculate total score
     total_score = sum(c["score"] for c in results["checks"].values())
     total_max = sum(c["max"] for c in results["checks"].values())
     percentage = round((total_score / total_max) * 100) if total_max > 0 else 0
@@ -274,7 +302,6 @@ def scan_domain(domain):
     results["total_points"] = total_score
     results["max_points"] = total_max
 
-    # Count findings
     fails = sum(1 for c in results["checks"].values() for d in c["details"] if d["status"] == "fail")
     warns = sum(1 for c in results["checks"].values() for d in c["details"] if d["status"] == "warn")
     passes = sum(1 for c in results["checks"].values() for d in c["details"] if d["status"] == "pass")
